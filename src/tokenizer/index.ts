@@ -37,7 +37,7 @@ function getDeepSeek(): DeepSeekTokenizer {
 
 function isOpenAI(modelId: string): boolean {
   const id = modelId.toLowerCase()
-  return /^(gpt|openai|^o[1-9])/.test(id)
+  return /^(gpt|openai|o[1-9])/.test(id)
 }
 
 function isClaude(modelId: string): boolean {

@@ -2,8 +2,8 @@
 
 **OpenCode plugin that captures raw telemetry for TACO benchmarking**
 
-**Last Updated:** April 29, 2026
-**Status:** 77/78 tests pass. Build: clean. Typecheck: clean. One known failing test (cost_share split, see Known Limitations).
+**Last Updated:** April 30, 2026
+**Status:** 116/116 tests pass. Build: clean. Typecheck: clean.
 
 ---
 
@@ -52,7 +52,11 @@ The plugin registers 6 OpenCode hooks that fire at different points in the LLM l
 | `tool.execute.after`                   | Tool call completes      | `tool_calls` (update), `tool_latency_breakdown`                              |
 | `event`                                | SSE stream events        | `step_metrics`, `streaming_timing`, `token_estimates`, `retrieval_relevance` |
 
-**Concurrency model:** All DB writes use `queueMicrotask()` to avoid blocking. Session-scoped `Map<string, Set<string>>` structures deduplicate first-occurrence events. Cleanup on `session.idle` prevents memory leaks.
+**Concurrency model:** DB writes use `queueMicrotask()` to avoid blocking (heavy work like relevance scoring uses `setTimeout(fn, 0)` to yield to I/O). Session-scoped `Map<string, Set<string>>` structures deduplicate first-occurrence events; capped at 50 sessions to bound memory. Cleanup on `session.idle` releases per-session state.
+
+**In-memory caches in `plugin.ts`:**
+- `_modelCache: Map<string, string>` — caches `sessionId → modelId` populated by `chat.params`; eliminates repeated DB lookups in tool hooks.
+- `_toolStartTimes: Map<string, number>` — caches `callId → wallStart` set in `tool.execute.before`, consumed in `tool.execute.after` to compute latency without a DB read (avoids a microtask race).
 
 **Database:** `~/.local/share/taco/plugin.db` — WAL mode so TACO CLI can read concurrently while the plugin writes.
 
@@ -108,7 +112,10 @@ taco-plugin/
 │   ├── benchmark.test.ts
 │   ├── tokenizer.test.ts
 │   ├── compress.test.ts
-│   └── hash.test.ts
+│   ├── hash.test.ts
+│   ├── events.test.ts
+│   ├── system-prompt.test.ts
+│   └── connection.test.ts
 └── dist/                     # Compiled output (tsc)
 ```
 
@@ -217,6 +224,3 @@ The assistant message ID is not available in the `before` hook — it's only ava
 
 **2. `tool_calls.truncated` field may never be populated**
 The plugin checks `output.metadata?.truncated === true`, but the SDK may expose truncation reason differently (e.g., via a `reason: 'length'` field or different field name). The column exists in the schema but may stay as `false`/`0` unless OpenCode explicitly sets `metadata.truncated = true`.
-
-**3. `cost_share` calculation edge case**
-When all `tool_calls.output_size_bytes` values for a message are NULL, the proportional cost-share split defaults to 0 for all calls instead of splitting equally. This is a low-priority edge case (test `writers-full.test.ts` line 277-288 documents the expected behavior but the current implementation doesn't handle it).

@@ -21,7 +21,7 @@ let _testDb: Database;
 mock.module('../src/db/connection.js', () => ({
   getPluginDb: () => _testDb,
   closePluginDb: () => {},
-  OBSERVER_DB_PATH: ':memory:',
+  PLUGIN_DB_PATH: ':memory:',
 }));
 
 // Now import the writers — they will call our stubbed getPluginDb().

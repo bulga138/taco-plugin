@@ -21,6 +21,9 @@ import { scoreMessageToolCalls } from '../analysis/relevance.js';
 // ─── Session-scoped dedup sets ────────────────────────────────────────────────
 // Outer key = sessionId, inner Set = messageIds already seen.
 // Cleaned up on session.idle to prevent unbounded growth.
+// Max tracked sessions: once this limit is exceeded the oldest session is evicted.
+
+const MAX_TRACKED_SESSIONS = 50;
 
 const _seenFirstPart = new Map<string, Set<string>>();
 const _seenFirstText = new Map<string, Set<string>>();
@@ -32,6 +35,11 @@ const _seenTimingRow = new Map<string, Set<string>>();
 function seenFor(map: Map<string, Set<string>>, sessionId: string): Set<string> {
   let s = map.get(sessionId);
   if (!s) {
+    // Evict oldest entry if at capacity
+    if (map.size >= MAX_TRACKED_SESSIONS) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey !== undefined) map.delete(oldestKey);
+    }
     s = new Set();
     map.set(sessionId, s);
   }
@@ -192,7 +200,9 @@ export function makeEventHook(): NonNullable<Hooks['event']> {
         // Relevance scoring — runs offline against data already in the DB.
         // Extract the assistant's text response from the event's finish info,
         // then score each completed tool call for this message.
-        queueMicrotask(() => {
+        // Uses setTimeout to yield to other I/O since
+        // scoring involves tokenizing potentially large tool outputs.
+        setTimeout(() => {
           try {
             // The message.updated event carries a `parts` array on some SDK
             // versions; fall back to an empty string if unavailable.
@@ -208,7 +218,7 @@ export function makeEventHook(): NonNullable<Hooks['event']> {
           } catch {
             /* non-critical */
           }
-        });
+        }, 0);
       }
     } catch (err) {
       console.error('[taco-plugin] event hook error:', (err as Error).message);

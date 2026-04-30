@@ -23,4 +23,4 @@ const module_: PluginModule = {
 
 export default module_;
 export { TacoPlugin };
-export { OBSERVER_DB_PATH } from './db/connection.js';
+export { PLUGIN_DB_PATH } from './db/connection.js';

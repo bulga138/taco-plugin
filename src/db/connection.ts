@@ -62,4 +62,4 @@ export function closePluginDb(): void {
 }
 
 /** DB path — exported so TACO CLI can read the same file. */
-export { DB_PATH as OBSERVER_DB_PATH };
+export { DB_PATH as PLUGIN_DB_PATH };

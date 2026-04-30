@@ -92,17 +92,19 @@ export function scoreLineOverlap(outputText: string, responseText: string, model
 
   const fetchedLines = outputLines.length;
   let referencedLines = 0;
-  let referencedChars = 0;
+  const matchedLineTexts: string[] = [];
 
   for (const line of outputLines) {
     if (line.length < 4) continue; // skip trivial lines
     if (responseSet.has(line) || responseText.includes(line)) {
       referencedLines++;
-      referencedChars += line.length;
+      matchedLineTexts.push(line);
     }
   }
 
-  const referencedTokens = estimateTokens(outputLines.filter((_, i) => i < referencedLines).join('\n'), modelId).count;
+  const referencedTokens = matchedLineTexts.length > 0
+    ? estimateTokens(matchedLineTexts.join('\n'), modelId).count
+    : 0;
 
   const fetchedTokens = estimateTokens(outputText, modelId).count;
   const relevanceRatio = fetchedTokens > 0 ? Math.min(1, referencedTokens / fetchedTokens) : 0;

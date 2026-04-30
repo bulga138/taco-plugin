@@ -270,7 +270,7 @@ export function updateToolCallCostShares(messageId: string, totalCost: number): 
       .get(messageId);
 
     const totalBytes = sumRow?.total_bytes ?? 0;
-    if (totalBytes === 0 || totalCost === 0) return;
+    if (totalCost === 0) return;
 
     // Update each call with its proportional share
     const rows = db
@@ -280,10 +280,20 @@ export function updateToolCallCostShares(messageId: string, totalCost: number): 
       >(`SELECT id, output_size_bytes FROM tool_calls WHERE message_id = ? AND status = 'completed'`)
       .all(messageId);
 
-    for (const r of rows) {
-      const share = ((r.output_size_bytes ?? 0) / totalBytes) * totalCost;
-      db.run(`UPDATE tool_calls SET cost_share = ? WHERE id = ?`, [share, r.id]);
-    }
+    if (rows.length === 0) return;
+
+    const updateShare = db.prepare(`UPDATE tool_calls SET cost_share = ? WHERE id = ?`);
+    const updateAll = db.transaction(() => {
+      for (const r of rows) {
+        // If totalBytes === 0 (all NULL), split equally; otherwise split proportionally
+        const share =
+          totalBytes === 0
+            ? totalCost / rows.length
+            : ((r.output_size_bytes ?? 0) / totalBytes) * totalCost;
+        updateShare.run(share, r.id);
+      }
+    });
+    updateAll();
   } catch (err) {
     console.error('[taco-plugin] updateToolCallCostShares error:', (err as Error).message);
   }
@@ -361,7 +371,7 @@ export interface UpdateStreamingFieldRow {
   timestamp: number;
 }
 
-export function updateStreamingField(messageId: string, field: string, timestamp: number): void {
+export function updateStreamingField(messageId: string, field: UpdateStreamingFieldRow['field'], timestamp: number): void {
   try {
     const db = getPluginDb();
     // Only set if NULL (first occurrence)
