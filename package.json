@@ -18,7 +18,7 @@
     "dev": "tsc --watch"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.4.0"
+    "@opencode-ai/plugin": "^1.14.29"
   },
   "dependencies": {
     "gpt-tokenizer": "^3.4.0",
