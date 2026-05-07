@@ -55,6 +55,7 @@ The plugin registers 6 OpenCode hooks that fire at different points in the LLM l
 **Concurrency model:** DB writes use `queueMicrotask()` to avoid blocking (heavy work like relevance scoring uses `setTimeout(fn, 0)` to yield to I/O). Session-scoped `Map<string, Set<string>>` structures deduplicate first-occurrence events; capped at 50 sessions to bound memory. Cleanup on `session.idle` releases per-session state.
 
 **In-memory caches in `plugin.ts`:**
+
 - `_modelCache: Map<string, string>` — caches `sessionId → modelId` populated by `chat.params`; eliminates repeated DB lookups in tool hooks.
 - `_toolStartTimes: Map<string, number>` — caches `callId → wallStart` set in `tool.execute.before`, consumed in `tool.execute.after` to compute latency without a DB read (avoids a microtask race).
 
@@ -135,7 +136,7 @@ When modifying these files, also update:
 Registered in `opencode.json`:
 
 ```json
-{ "plugin": ["taco-plugin"] }
+{ "plugin": ["@bulga138/taco-plugin"] }
 ```
 
 The plugin exports a `PluginModule` with `id: 'taco-plugin'`. On process exit/SIGTERM, it flushes the WAL and closes the DB cleanly.

@@ -11,7 +11,7 @@ Zero configuration — runs entirely on Bun built-ins.
 Register in `opencode.json`:
 
 ```json
-{ "plugin": ["taco-plugin"] }
+{ "plugin": ["@bulga138/taco-plugin"] }
 ```
 
 Or from a local path during development:
