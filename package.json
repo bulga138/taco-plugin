@@ -1,6 +1,6 @@
 {
   "name": "@bulga138/taco-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenCode plugin that captures raw telemetry for TACO benchmarking",
   "type": "module",
   "main": "./dist/index.js",
