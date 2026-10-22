@@ -5,7 +5,7 @@
  * Writer functions run for real against the in-memory DB — no mock for writers.js.
  * This avoids mock-bleed that would break writers-full.test.ts.
  *
- * Tests cover: dedup logic, streaming timing seeding, step-finish metrics,
+ * Tests cover: dedup logic, streaming timing seeding, step-ended metrics,
  * session cleanup, and bounded Map eviction.
  */
 
@@ -20,14 +20,14 @@ let _testDb: Database;
 mock.module('../src/db/connection.js', () => ({
   getPluginDb: () => _testDb,
   closePluginDb: () => {},
-  PLUGIN_DB_PATH,
+  PLUGIN_DB_PATH: ':memory:',
 }));
 
-// ─── Import hook after stubs are registered ────────────────────────────────────
+// ─── Import handler after stubs are registered ────────────────────────────────
 
-const { makeEventHook } = await import('../src/hooks/events.js');
+const { makeEventHandler } = await import('../src/hooks/events.js');
 
-// ─── Spy on relevance scoring ───────────────────────────────────────────────────
+// ─── Spy on relevance scoring ─────────────────────────────────────────────────
 
 import * as relevance from '../src/analysis/relevance.js';
 
@@ -43,30 +43,57 @@ afterEach(() => {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-type EventHook = ReturnType<typeof makeEventHook>;
+type EventHandler = ReturnType<typeof makeEventHandler>;
 
-function makePartEvent(
+function makeStepStartedEvent(messageId: string, sessionId: string) {
+  return {
+    id: 'evt-step-started',
+    type: 'session.step.started',
+    data: { assistantMessageID: messageId, sessionID: sessionId },
+  };
+}
+
+function makeTextStartedEvent(messageId: string, sessionId: string) {
+  return {
+    id: 'evt-text-started',
+    type: 'session.text.started',
+    data: { assistantMessageID: messageId, sessionID: sessionId },
+  };
+}
+
+function makeToolInputStartedEvent(messageId: string, sessionId: string) {
+  return {
+    id: 'evt-tool-started',
+    type: 'session.tool.input.started',
+    data: { assistantMessageID: messageId, sessionID: sessionId },
+  };
+}
+
+function makeStepEndedEvent(
   messageId: string,
   sessionId: string,
-  type: 'text' | 'tool' | 'step-finish',
   extra: Record<string, unknown> = {},
+  eventId = 'step-id-1',
 ) {
   return {
-    event: {
-      type: 'message.part.updated',
-      properties: {
-        part: { messageID: messageId, sessionID: sessionId, type, ...extra },
-      },
+    id: eventId,
+    type: 'session.step.ended',
+    data: {
+      assistantMessageID: messageId,
+      sessionID: sessionId,
+      finish: 'tool_use',
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      ...extra,
     },
   };
 }
 
 function makeIdleEvent(sessionId: string) {
   return {
-    event: {
-      type: 'session.idle',
-      properties: { sessionID: sessionId },
-    },
+    id: 'evt-idle',
+    type: 'session.idle',
+    data: { sessionID: sessionId },
   };
 }
 
@@ -78,19 +105,19 @@ function getStreamingRow(messageId: string) {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('makeEventHook — streaming timing seeding', () => {
-  let hook: EventHook;
+describe('makeEventHandler — streaming timing seeding', () => {
+  let handler: EventHandler;
 
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
-    hook = makeEventHook();
+    handler = makeEventHandler(new Map());
   });
 
   it('seeds streaming_timing row exactly once per (session, message)', async () => {
-    const evt = makePartEvent('msg-seed', 'sess-seed', 'text');
-    await hook(evt as any);
-    await hook(evt as any); // second call — same messageId
+    const evt = makeStepStartedEvent('msg-seed', 'sess-seed');
+    handler(evt);
+    handler(evt); // second call — same messageId
     await new Promise(r => queueMicrotask(r));
 
     const rows = _testDb
@@ -100,8 +127,8 @@ describe('makeEventHook — streaming timing seeding', () => {
   });
 
   it('seeds separate rows for different messages in same session', async () => {
-    await hook(makePartEvent('msg-a', 'sess-two', 'text') as any);
-    await hook(makePartEvent('msg-b', 'sess-two', 'text') as any);
+    handler(makeStepStartedEvent('msg-a', 'sess-two'));
+    handler(makeStepStartedEvent('msg-b', 'sess-two'));
     await new Promise(r => queueMicrotask(r));
 
     const rows = _testDb.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM streaming_timing`).get();
@@ -109,13 +136,13 @@ describe('makeEventHook — streaming timing seeding', () => {
   });
 });
 
-describe('makeEventHook — first_part_received dedup', () => {
-  let hook: EventHook;
+describe('makeEventHandler — first-occurrence dedup', () => {
+  let handler: EventHandler;
 
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
-    hook = makeEventHook();
+    handler = makeEventHandler(new Map());
   });
 
   it('records first_part_received only once per message', async () => {
@@ -126,9 +153,9 @@ describe('makeEventHook — first_part_received dedup', () => {
       Date.now(),
     ]);
 
-    const evt = makePartEvent('msg-dedup', 'sess-dedup', 'text');
-    await hook(evt as any);
-    await hook(evt as any); // duplicate
+    const evt = makeStepStartedEvent('msg-dedup', 'sess-dedup');
+    handler(evt);
+    handler(evt); // duplicate
     await new Promise(r => queueMicrotask(r));
 
     const row = getStreamingRow('msg-dedup');
@@ -144,9 +171,9 @@ describe('makeEventHook — first_part_received dedup', () => {
       1000,
     ]);
 
-    const evt = makePartEvent('msg-text', 'sess-text', 'text');
-    await hook(evt as any);
-    await hook(evt as any);
+    const evt = makeTextStartedEvent('msg-text', 'sess-text');
+    handler(evt);
+    handler(evt);
     await new Promise(r => queueMicrotask(r));
 
     const row = getStreamingRow('msg-text');
@@ -160,9 +187,9 @@ describe('makeEventHook — first_part_received dedup', () => {
       1000,
     ]);
 
-    const evt = makePartEvent('msg-tool', 'sess-tool', 'tool', { state: { status: 'pending' } });
-    await hook(evt as any);
-    await hook(evt as any);
+    const evt = makeToolInputStartedEvent('msg-tool', 'sess-tool');
+    handler(evt);
+    handler(evt);
     await new Promise(r => queueMicrotask(r));
 
     const row = getStreamingRow('msg-tool');
@@ -170,17 +197,17 @@ describe('makeEventHook — first_part_received dedup', () => {
   });
 });
 
-describe('makeEventHook — session cleanup', () => {
-  let hook: EventHook;
+describe('makeEventHandler — session cleanup', () => {
+  let handler: EventHandler;
 
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
-    hook = makeEventHook();
+    handler = makeEventHandler(new Map());
   });
 
   it('reseeds streaming_timing after session.idle clears dedup state', async () => {
-    await hook(makePartEvent('msg-1', 'sess-clean', 'text') as any);
+    handler(makeStepStartedEvent('msg-1', 'sess-clean'));
     await new Promise(r => queueMicrotask(r));
 
     const beforeIdle = _testDb
@@ -189,13 +216,13 @@ describe('makeEventHook — session cleanup', () => {
     expect(beforeIdle).toBe(1);
 
     // Fire idle — clears dedup sets for sess-clean
-    await hook(makeIdleEvent('sess-clean') as any);
+    handler(makeIdleEvent('sess-clean'));
 
     // Wipe DB row so we can detect a fresh seed
     _testDb.run(`DELETE FROM streaming_timing WHERE message_id = ?`, ['msg-1']);
 
     // Same messageId again — dedup was cleared, so it seeds again
-    await hook(makePartEvent('msg-1', 'sess-clean', 'text') as any);
+    handler(makeStepStartedEvent('msg-1', 'sess-clean'));
     await new Promise(r => queueMicrotask(r));
 
     const afterIdle = _testDb
@@ -205,29 +232,42 @@ describe('makeEventHook — session cleanup', () => {
   });
 });
 
-describe('makeEventHook — step-finish metrics', () => {
-  let hook: EventHook;
+describe('makeEventHandler — step metrics', () => {
+  let handler: EventHandler;
 
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
-    hook = makeEventHook();
+    handler = makeEventHandler(new Map());
   });
 
-  it('writes step metrics for step-finish part', async () => {
-    const evt = makePartEvent('msg-step', 'sess-step', 'step-finish', {
-      id: 'step-id-1',
-      sessionID: 'sess-step',
-      messageID: 'msg-step',
-      reason: 'tool_use',
+  it('writes step metrics for session.step.ended', async () => {
+    const evt = makeStepEndedEvent('msg-step', 'sess-step', {
       cost: 0.005,
       tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 10, write: 5 } },
     });
-    await hook(evt as any);
+    handler(evt);
     await new Promise(r => queueMicrotask(r));
 
     const row = _testDb.query<{ id: string }, [string]>(`SELECT id FROM step_metrics WHERE id = ?`).get('step-id-1');
     expect(row).not.toBeNull();
+  });
+
+  it('writes opencode token estimates keyed by assistant message', async () => {
+    handler(makeStepEndedEvent('msg-tok', 'sess-tok', {
+      cost: 0.01,
+      tokens: { input: 100, output: 50, reasoning: 7, cache: { read: 10, write: 5 } },
+    }, 'step-tok'));
+    await new Promise(r => queueMicrotask(r));
+
+    const row = _testDb
+      .query<{ total_tokens: number; approach: string }, [string]>(
+        `SELECT total_tokens, approach FROM token_estimates WHERE message_id = ?`,
+      )
+      .get('msg-tok');
+    expect(row).not.toBeNull();
+    expect(row!.approach).toBe('opencode');
+    expect(row!.total_tokens).toBe(100 + 50 + 7 + 10 + 5);
   });
 
   it('does not write cost_shares when cost is 0', async () => {
@@ -238,15 +278,11 @@ describe('makeEventHook — step-finish metrics', () => {
        VALUES ('tc-nocost', 'sess-nocost', 'msg-nocost', 'read', 1000, 'completed', '{}', 2)`,
     );
 
-    const evt = makePartEvent('msg-nocost', 'sess-nocost', 'step-finish', {
-      id: 'step-zero',
-      sessionID: 'sess-nocost',
-      messageID: 'msg-nocost',
-      reason: 'end_turn',
+    handler(makeStepEndedEvent('msg-nocost', 'sess-nocost', {
+      finish: 'end_turn',
       cost: 0,
       tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
-    });
-    await hook(evt as any);
+    }, 'step-zero'));
     await new Promise(r => queueMicrotask(r));
 
     const tc = _testDb
@@ -256,13 +292,13 @@ describe('makeEventHook — step-finish metrics', () => {
   });
 });
 
-describe('makeEventHook — bounded Map eviction', () => {
-  it('handles 60 unique sessions without throwing', async () => {
-    const hook = makeEventHook();
+describe('makeEventHandler — bounded Map eviction', () => {
+  it('handles 60 unique sessions without throwing', () => {
+    const handler = makeEventHandler(new Map());
     for (let i = 0; i < 60; i++) {
       _testDb = new Database(':memory:');
       _testDb.run(DDL);
-      await hook(makePartEvent(`msg-${i}`, `sess-bound-${i}`, 'text') as any);
+      handler(makeStepStartedEvent(`msg-${i}`, `sess-bound-${i}`));
     }
     // If we get here without error, eviction worked
     expect(true).toBe(true);

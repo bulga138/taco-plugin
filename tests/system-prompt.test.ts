@@ -25,16 +25,12 @@ mock.module('../src/db/connection.js', () => ({
 
 // ─── Import hook after stubs ──────────────────────────────────────────────────
 
-const { makeSystemPromptHook } = await import('../src/hooks/system-prompt.js');
+const { captureSystemPrompt } = await import('../src/hooks/system-prompt.js');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function makeInput(sessionID = 'sess-sp', modelId = 'claude-3-5-sonnet') {
-  return { sessionID, model: { id: modelId } };
-}
-
-function makeOutput(lines: string[]) {
-  return { system: lines };
+function makeParts(lines: string[]) {
+  return lines.map(text => ({ type: 'text', text }));
 }
 
 function getRows() {
@@ -48,15 +44,14 @@ function getRows() {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('makeSystemPromptHook — basic capture', () => {
+describe('captureSystemPrompt — basic capture', () => {
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
   });
 
   it('inserts a row with the joined content', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput() as any, makeOutput(['You are a helpful assistant.']) as any);
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts(['You are a helpful assistant.']));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
@@ -64,9 +59,8 @@ describe('makeSystemPromptHook — basic capture', () => {
     expect(rows[0]!.content).toBe('You are a helpful assistant.');
   });
 
-  it('joins multiple system lines with double newline', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput() as any, makeOutput(['Line one.', 'Line two.']) as any);
+  it('joins multiple system parts with double newline', async () => {
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts(['Line one.', 'Line two.']));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
@@ -74,8 +68,7 @@ describe('makeSystemPromptHook — basic capture', () => {
   });
 
   it('stores a non-zero token count', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput() as any, makeOutput(['You are a helpful assistant.']) as any);
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts(['You are a helpful assistant.']));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
@@ -83,15 +76,14 @@ describe('makeSystemPromptHook — basic capture', () => {
   });
 });
 
-describe('makeSystemPromptHook — empty content early return', () => {
+describe('captureSystemPrompt — empty content early return', () => {
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
   });
 
-  it('does not insert a row when system array is empty', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput() as any, makeOutput([]) as any);
+  it('does not insert a row when parts array is empty', async () => {
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts([]));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
@@ -99,17 +91,16 @@ describe('makeSystemPromptHook — empty content early return', () => {
   });
 });
 
-describe('makeSystemPromptHook — deduplication', () => {
+describe('captureSystemPrompt — deduplication', () => {
   beforeEach(() => {
     _testDb = new Database(':memory:');
     _testDb.run(DDL);
   });
 
   it('only inserts one DB row when the same content is seen twice (INSERT OR IGNORE)', async () => {
-    const hook = makeSystemPromptHook();
-    const content = ['You are a helpful assistant.'];
-    await hook(makeInput() as any, makeOutput(content) as any);
-    await hook(makeInput() as any, makeOutput(content) as any);
+    const content = makeParts(['You are a helpful assistant.']);
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', content);
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', content);
     await new Promise(r => queueMicrotask(r));
 
     const count = _testDb.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM system_prompts`).get()!.count;
@@ -117,9 +108,8 @@ describe('makeSystemPromptHook — deduplication', () => {
   });
 
   it('produces the same content_hash for identical content', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput() as any, makeOutput(['Same content.']) as any);
-    await hook(makeInput() as any, makeOutput(['Same content.']) as any);
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts(['Same content.']));
+    captureSystemPrompt('sess-sp', 'claude-3-5-sonnet', makeParts(['Same content.']));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
@@ -129,9 +119,8 @@ describe('makeSystemPromptHook — deduplication', () => {
   });
 
   it('inserts two rows for different content', async () => {
-    const hook = makeSystemPromptHook();
-    await hook(makeInput('s1') as any, makeOutput(['Content A.']) as any);
-    await hook(makeInput('s2') as any, makeOutput(['Content B.']) as any);
+    captureSystemPrompt('s1', 'claude-3-5-sonnet', makeParts(['Content A.']));
+    captureSystemPrompt('s2', 'claude-3-5-sonnet', makeParts(['Content B.']));
     await new Promise(r => queueMicrotask(r));
 
     const rows = getRows();
