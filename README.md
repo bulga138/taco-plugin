@@ -6,18 +6,20 @@ Captures per-turn, per-tool, and per-step metrics into a SQLite database. TACO C
 
 Zero configuration — runs entirely on Bun built-ins.
 
+> Requires OpenCode V2 (>= 2.0). V1 hook API is no longer supported.
+
 ## Usage
 
 Register in `opencode.json`:
 
 ```json
-{ "plugin": ["@bulga138/taco-plugin"] }
+{ "plugins": ["@bulga138/taco-plugin"] }
 ```
 
 Or from a local path during development:
 
 ```json
-{ "plugin": ["/path/to/taco-plugin"] }
+{ "plugins": ["/path/to/taco-plugin"] }
 ```
 
 Then run:
@@ -28,16 +30,14 @@ bun install && bun run build
 
 ## Hooks
 
-The plugin registers 6 OpenCode hooks:
+The plugin registers 3 OpenCode V2 hook surfaces:
 
-| Hook                                   | Fires When               | Writes To                                                 |
-| -------------------------------------- | ------------------------ | --------------------------------------------------------- |
-| `chat.params`                          | Before each LLM request  | `chat_params`, `token_estimates`                          |
-| `experimental.chat.system.transform`   | System prompt assembled  | `system_prompts`                                          |
-| `experimental.chat.messages.transform` | Context window assembled | `context_snapshots`                                       |
-| `tool.execute.before`                  | Tool call starts         | `tool_calls` (partial)                                    |
-| `tool.execute.after`                   | Tool call completes      | `tool_calls` (update), `tool_latency_breakdown`           |
-| `event`                                | SSE stream events        | `step_metrics`, `streaming_timing`, `retrieval_relevance` |
+| Hook (V2)                             | Fires When                  | Writes To                                                 |
+| ------------------------------------- | --------------------------- | --------------------------------------------------------- |
+| `session.hook("context")`             | Before each model request   | `chat_params`, `token_estimates`, `system_prompts`, `context_snapshots` |
+| `tool.hook("execute.before")`         | Tool call starts            | `tool_calls` (partial)                                    |
+| `tool.hook("execute.after")`          | Tool call completes         | `tool_calls` (update), `tool_latency_breakdown`           |
+| `event.subscribe()` stream            | `session.*` events          | `step_metrics`, `streaming_timing`, `retrieval_relevance` |
 
 ## Database
 

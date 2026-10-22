@@ -7,8 +7,20 @@
 
 export const SCHEMA_VERSION = 3;
 
+/**
+ * How long a write waits for the SQLite write lock before giving up.
+ *
+ * Several OpenCode processes share this file, and SQLite's default is to fail
+ * instantly with SQLITE_BUSY — every collision silently drops a telemetry row.
+ * The busy handler blocks the event loop while it waits, so this value is also
+ * the worst-case stall: keep it well above the few-millisecond window a normal
+ * write holds the lock for, but low enough to never feel like a freeze.
+ */
+export const BUSY_TIMEOUT_MS = 500;
+
 export const DDL = /* sql */ `
 
+PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;

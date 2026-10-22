@@ -41,25 +41,28 @@ When modifying this codebase:
 
 ## How It Works
 
-The plugin registers 6 OpenCode hooks that fire at different points in the LLM lifecycle:
+The plugin registers 3 OpenCode V2 hook surfaces (port from V1 hooks):
 
-| Hook                                   | Fires When               | Writes To                                                                    |
-| -------------------------------------- | ------------------------ | ---------------------------------------------------------------------------- |
-| `chat.params`                          | Before each LLM request  | `chat_params`, `token_estimates`                                             |
-| `experimental.chat.system.transform`   | System prompt assembled  | `system_prompts`                                                             |
-| `experimental.chat.messages.transform` | Context window assembled | `context_snapshots`                                                          |
-| `tool.execute.before`                  | Tool call starts         | `tool_calls` (partial)                                                       |
-| `tool.execute.after`                   | Tool call completes      | `tool_calls` (update), `tool_latency_breakdown`                              |
-| `event`                                | SSE stream events        | `step_metrics`, `streaming_timing`, `token_estimates`, `retrieval_relevance` |
+| Hook (V2)                            | Fires When               | Writes To                                                                    |
+| ------------------------------------ | ------------------------ | ---------------------------------------------------------------------------- |
+| `session.hook("context")`            | Before each model request | `chat_params`, `token_estimates`, `system_prompts`, `context_snapshots`      |
+| `tool.hook("execute.before")`        | Tool call starts         | `tool_calls` (partial)                                                       |
+| `tool.hook("execute.after")`         | Tool call completes      | `tool_calls` (update), `tool_latency_breakdown`                              |
+| `event.subscribe()` stream           | `session.*` events       | `step_metrics`, `streaming_timing`, `token_estimates`, `retrieval_relevance` |
+
+V1 hook mapping: `chat.params` + both `experimental.chat.*.transform` hooks → single `session.hook("context")` handler; `message.part.updated` → `session.step.started` / `session.text.started` / `session.tool.input.started`; `step-finish` part → `session.step.ended`; assistant `message.updated` (finish) → `session.step.ended` (also carries tokens + cost in V2).
 
 **Concurrency model:** DB writes use `queueMicrotask()` to avoid blocking (heavy work like relevance scoring uses `setTimeout(fn, 0)` to yield to I/O). Session-scoped `Map<string, Set<string>>` structures deduplicate first-occurrence events; capped at 50 sessions to bound memory. Cleanup on `session.idle` releases per-session state.
 
 **In-memory caches in `plugin.ts`:**
 
-- `_modelCache: Map<string, string>` — caches `sessionId → modelId` populated by `chat.params`; eliminates repeated DB lookups in tool hooks.
-- `_toolStartTimes: Map<string, number>` — caches `callId → wallStart` set in `tool.execute.before`, consumed in `tool.execute.after` to compute latency without a DB read (avoids a microtask race).
+- `_modelCache: Map<string, string>` — caches `sessionId → modelId` populated by the `context` hook; eliminates repeated DB lookups in tool hooks and event handling.
+- `_toolStartTimes: Map<string, number>` — caches `callId → wallStart` set in `tool.hook("execute.before")`, consumed in `tool.hook("execute.after")` to compute latency without a DB read (avoids a microtask race).
+- Model info (context/output limits + cost rates) loaded once via `ctx.model.list()` and cached for the process lifetime.
 
-**Database:** `~/.local/share/taco/plugin.db` — WAL mode so TACO CLI can read concurrently while the plugin writes.
+**Database:** `~/.local/share/taco/plugin.db` — WAL mode so TACO CLI can read concurrently while the plugin writes. `getPluginDb()` reads `PRAGMA journal_mode` back after the DDL and logs an error if it is not `wal`: WAL needs shared-memory support from the filesystem, and a silent fallback to `delete` mode would let readers block writers again.
+
+**Multi-process contention:** every OpenCode process on the machine loads this plugin, and each one opens its own connection to the same `plugin.db`. SQLite's default `busy_timeout` is 0, so a write that collides with another process fails instantly with `SQLITE_BUSY` and the telemetry row is silently dropped. The DDL therefore opens with `PRAGMA busy_timeout = 500` (`BUSY_TIMEOUT_MS` in `src/db/schema.ts`), and it must come first in the pragma block, before `journal_mode = WAL` can block. The busy handler blocks the event loop while it waits, so that value is also the worst-case stall; keep it short. `updateToolCallCostShares` uses an IMMEDIATE transaction so it takes the write lock up front: a deferred transaction would fail with `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` cannot retry.
 
 ## Database Schema (v3)
 
@@ -133,13 +136,13 @@ When modifying these files, also update:
 
 ### With OpenCode
 
-Registered in `opencode.json`:
+Registered in `opencode.json` (V2 config uses `plugins`, not `plugin`):
 
 ```json
-{ "plugin": ["@bulga138/taco-plugin"] }
+{ "plugins": ["@bulga138/taco-plugin"] }
 ```
 
-The plugin exports a `PluginModule` with `id: 'taco-plugin'`. On process exit/SIGTERM, it flushes the WAL and closes the DB cleanly.
+The plugin default-exports `Plugin.define({ id: 'taco-plugin', setup })` from `@opencode/plugin` (V2). `setup` returns a cleanup function that aborts the event subscription; on process exit/SIGTERM the plugin also flushes the WAL and closes the DB cleanly.
 
 ### With TACO CLI
 
@@ -152,12 +155,10 @@ TACO CLI reads `~/.local/share/taco/plugin.db` using `better-sqlite3` or `sql.js
 ```
 OpenCode process (Bun)                    TACO CLI (Node.js)
 ─────────────────────                     ──────────────────
-chat.params hook ──────┐
-system.transform ──────┤
-messages.transform ────┤                  plugin-db.ts
-tool.execute.before ───┼──→ plugin.db ──→ loadPlugin*()
-tool.execute.after ────┤    (WAL mode)      functions
-event (SSE stream) ────┘                     │
+session.hook("context") ─┐
+tool.hook(before) ───────┤                  plugin-db.ts
+tool.hook(after) ────────┼──→ plugin.db ──→ loadPlugin*()
+event.subscribe() ───────┘    (WAL mode)      functions
                                              ↓
                                     session-detail.ts
                                     benchmark.ts
@@ -220,8 +221,8 @@ bun run dev            # Watch mode
 
 ## Known Limitations
 
-**1. `tool_calls.message_id` is empty in `tool.execute.before`**
-The assistant message ID is not available in the `before` hook — it's only available in the SSE event stream. The `tool_calls` table has `message_id` but it's stored as empty string in `before` and never enriched. This means tool calls cannot reliably join to `step_metrics` on `message_id`. This is a limitation of the OpenCode plugin SDK — the before hook only has access to the user message, not the assistant message that will be created.
+**1. `chat_params.id` is synthetic in the V2 `context` hook**
+The V2 `session.hook("context")` event carries no messageID, so chat_params and context_snapshots rows use a synthetic `${sessionId}:${Date.now()}` key. Ground-truth token estimates and step metrics still key on the real assistant messageID (from `session.step.ended`). V2 tool hooks were expected to expose the assistant `messageID` directly, but at runtime they do not: `tool_calls.message_id` is written as `''` for every row, so `tool_calls` cannot be joined to `step_metrics`, and `retrieval_relevance` stays empty because `scoreMessageToolCalls` looks up `tool_calls WHERE message_id = ?` and matches nothing.
 
 **2. `tool_calls.truncated` field may never be populated**
-The plugin checks `output.metadata?.truncated === true`, but the SDK may expose truncation reason differently (e.g., via a `reason: 'length'` field or different field name). The column exists in the schema but may stay as `false`/`0` unless OpenCode explicitly sets `metadata.truncated = true`.
+The plugin checks `result.metadata?.truncated === true`, but the SDK may expose truncation reason differently (e.g., via a `reason: 'length'` field or different field name). The column exists in the schema but may stay as `false`/`0` unless OpenCode explicitly sets `metadata.truncated = true`.
