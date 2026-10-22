@@ -60,7 +60,9 @@ V1 hook mapping: `chat.params` + both `experimental.chat.*.transform` hooks → 
 - `_toolStartTimes: Map<string, number>` — caches `callId → wallStart` set in `tool.hook("execute.before")`, consumed in `tool.hook("execute.after")` to compute latency without a DB read (avoids a microtask race).
 - Model info (context/output limits + cost rates) loaded once via `ctx.model.list()` and cached for the process lifetime.
 
-**Database:** `~/.local/share/taco/plugin.db` — WAL mode so TACO CLI can read concurrently while the plugin writes.
+**Database:** `~/.local/share/taco/plugin.db` — WAL mode so TACO CLI can read concurrently while the plugin writes. `getPluginDb()` reads `PRAGMA journal_mode` back after the DDL and logs an error if it is not `wal`: WAL needs shared-memory support from the filesystem, and a silent fallback to `delete` mode would let readers block writers again.
+
+**Multi-process contention:** every OpenCode process on the machine loads this plugin, and each one opens its own connection to the same `plugin.db`. SQLite's default `busy_timeout` is 0, so a write that collides with another process fails instantly with `SQLITE_BUSY` and the telemetry row is silently dropped. The DDL therefore opens with `PRAGMA busy_timeout = 500` (`BUSY_TIMEOUT_MS` in `src/db/schema.ts`), and it must come first in the pragma block, before `journal_mode = WAL` can block. The busy handler blocks the event loop while it waits, so that value is also the worst-case stall; keep it short. `updateToolCallCostShares` uses an IMMEDIATE transaction so it takes the write lock up front: a deferred transaction would fail with `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` cannot retry.
 
 ## Database Schema (v3)
 
@@ -220,7 +222,7 @@ bun run dev            # Watch mode
 ## Known Limitations
 
 **1. `chat_params.id` is synthetic in the V2 `context` hook**
-The V2 `session.hook("context")` event carries no messageID, so chat_params and context_snapshots rows use a synthetic `${sessionId}:${Date.now()}` key. Ground-truth token estimates and step metrics still key on the real assistant messageID (from `session.step.ended`). Fixed vs V1: `tool_calls.message_id` is now populated — V2 tool hooks expose the assistant `messageID` directly.
+The V2 `session.hook("context")` event carries no messageID, so chat_params and context_snapshots rows use a synthetic `${sessionId}:${Date.now()}` key. Ground-truth token estimates and step metrics still key on the real assistant messageID (from `session.step.ended`). V2 tool hooks were expected to expose the assistant `messageID` directly, but at runtime they do not: `tool_calls.message_id` is written as `''` for every row, so `tool_calls` cannot be joined to `step_metrics`, and `retrieval_relevance` stays empty because `scoreMessageToolCalls` looks up `tool_calls WHERE message_id = ?` and matches nothing.
 
 **2. `tool_calls.truncated` field may never be populated**
 The plugin checks `result.metadata?.truncated === true`, but the SDK may expose truncation reason differently (e.g., via a `reason: 'length'` field or different field name). The column exists in the schema but may stay as `false`/`0` unless OpenCode explicitly sets `metadata.truncated = true`.

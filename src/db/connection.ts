@@ -22,29 +22,54 @@ export function getPluginDb(): Database {
   // Ensure directory exists
   mkdirSync(dirname(DB_PATH), { recursive: true });
 
-  _db = new Database(DB_PATH, { create: true });
+  const db = new Database(DB_PATH, { create: true });
 
-  // Apply DDL (idempotent CREATE IF NOT EXISTS statements)
-  _db.run(DDL);
+  try {
+    // Apply DDL (idempotent CREATE IF NOT EXISTS statements).
+    // The DDL opens with the connection pragmas, busy_timeout first.
+    db.run(DDL);
 
-  // Run migrations (ALTER TABLE ADD COLUMN — safe to re-run, duplicate column errors ignored)
-  for (const migration of MIGRATIONS) {
-    try {
-      _db.run(migration);
-    } catch {
-      // Column already exists — safe to ignore
+    // WAL is what lets the TACO CLI read while we write. If the filesystem
+    // lacks shared-memory support the pragma silently leaves the old journal
+    // mode in place, and readers then block writers — the exact symptom this
+    // module exists to avoid. Say so instead of degrading quietly.
+    const journalMode = db.query<{ journal_mode: string }, []>(`PRAGMA journal_mode`).get();
+    if (journalMode?.journal_mode !== 'wal') {
+      console.error(
+        '[taco-plugin] WAL unavailable — journal mode is',
+        journalMode?.journal_mode,
+        '(readers will block writers)',
+      );
     }
+
+    // Run migrations (ALTER TABLE ADD COLUMN — safe to re-run, duplicate column errors ignored)
+    for (const migration of MIGRATIONS) {
+      try {
+        db.run(migration);
+      } catch {
+        // Column already exists — safe to ignore
+      }
+    }
+
+    // Write or update schema version
+    const existing = db.query<{ value: string }, []>(`SELECT value FROM meta WHERE key = 'schema_version'`).get();
+
+    if (!existing) {
+      db.run(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, [String(SCHEMA_VERSION)]);
+    } else if (Number(existing.value) < SCHEMA_VERSION) {
+      db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, [String(SCHEMA_VERSION)]);
+    }
+  } catch (err) {
+    // Don't cache a half-initialised connection — the next caller retries.
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+    throw err;
   }
 
-  // Write or update schema version
-  const existing = _db.query<{ value: string }, []>(`SELECT value FROM meta WHERE key = 'schema_version'`).get();
-
-  if (!existing) {
-    _db.run(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, [String(SCHEMA_VERSION)]);
-  } else if (Number(existing.value) < SCHEMA_VERSION) {
-    _db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, [String(SCHEMA_VERSION)]);
-  }
-
+  _db = db;
   return _db;
 }
 
@@ -52,7 +77,9 @@ export function getPluginDb(): Database {
 export function closePluginDb(): void {
   if (_db) {
     try {
-      _db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+      // PASSIVE never blocks — TRUNCATE stalls exit while other OpenCode
+      // processes hold the write lock.
+      _db.run('PRAGMA wal_checkpoint(PASSIVE)');
       _db.close();
     } catch {
       // ignore close errors

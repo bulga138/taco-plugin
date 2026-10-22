@@ -283,6 +283,9 @@ export function updateToolCallCostShares(messageId: string, totalCost: number): 
     if (rows.length === 0) return;
 
     const updateShare = db.prepare(`UPDATE tool_calls SET cost_share = ? WHERE id = ?`);
+    // IMMEDIATE takes the write lock up front. A deferred transaction would
+    // upgrade mid-way and fail with SQLITE_BUSY_SNAPSHOT, which busy_timeout
+    // cannot retry.
     const updateAll = db.transaction(() => {
       for (const r of rows) {
         // If totalBytes === 0 (all NULL), split equally; otherwise split proportionally
@@ -293,7 +296,7 @@ export function updateToolCallCostShares(messageId: string, totalCost: number): 
         updateShare.run(share, r.id);
       }
     });
-    updateAll();
+    updateAll.immediate();
   } catch (err) {
     console.error('[taco-plugin] updateToolCallCostShares error:', (err as Error).message);
   }
